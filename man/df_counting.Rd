@@ -32,7 +32,9 @@ df_counting(
   draws = 0,
   seedstart = 8316951,
   stop.onerror = FALSE,
-  censoring_allmarks = TRUE
+  censoring_allmarks = TRUE,
+  weight_variance = c("known", "estimated"),
+  weight_model = NULL
 )
 }
 \arguments{
@@ -40,7 +42,8 @@ df_counting(
 
 \item{tte.name}{Character; name of the time-to-event column in \code{df}.}
 
-\item{event.name}{Character; name of the event indicator column in \code{df} (1=event, 0=censored).}
+\item{event.name}{Character; name of the event indicator column in \code{df} (1=event, 0=censored).
+Logical (TRUE = event) and 1/2 coding (2 = event, as \code{survival::Surv} reads it) are also accepted.}
 
 \item{treat.name}{Character; name of the treatment/group column in \code{df} (must be coded as 0=control, 1=experimental).}
 
@@ -72,7 +75,9 @@ df_counting(
 
 \item{verbose}{Logical; whether to print warnings and diagnostic messages. Default: FALSE.}
 
-\item{qprob}{Numeric in (0,1); quantile probability for KM quantile table. Default: 0.5 (median).}
+\item{qprob}{Numeric in (0,1); survival level for the KM quantile table: the quantile reported is the
+time at which survival drops to \code{qprob}, i.e. \code{quantile(survfit(...), probs = 1 - qprob)}.
+Default: 0.5 (median).}
 
 \item{scheme}{Character; weighting scheme for logrank/Fleming-Harrington test.
 Options: "fh", "schemper", "XO", "MB", "custom_time", "fh_exp1", "fh_exp2". Default: "fh".}
@@ -97,22 +102,60 @@ Options: "fh", "schemper", "XO", "MB", "custom_time", "fh_exp1", "fh_exp2". Defa
 \item{stop.onerror}{Logical; whether to stop execution on errors (TRUE) or issue warnings (FALSE). Default: FALSE.}
 
 \item{censoring_allmarks}{Logical; if FALSE, removes events from censored time points. Default: TRUE.}
+
+\item{weight_variance}{How the weights are treated in standard errors, intervals, bands and tests.
+\code{"known"} (default): as fixed, known numbers. \code{"estimated"}: as estimated by the logistic
+propensity model given in \code{weight_model}, whose estimation is carried into the inference. Estimates
+never change. See the section "Estimated weights".}
+
+\item{weight_model}{With \code{weight_variance = "estimated"}, the object returned by
+\code{\link{ps_weights}} for the rows of \code{df}, in the same order; its weights must be the column
+\code{weight.name}. Ignored with \code{"known"}.}
 }
 \value{
 A list with the following components:
 \describe{
-\item{cox_results}{List with Cox model results including hazard ratio, confidence interval, p-value, and formatted text}
-\item{logrank_results}{List with log-rank test chi-square statistic, p-value, and formatted text}
-\item{z.score}{Standardized weighted log-rank test statistic}
+\item{cox_results}{List with the results of \code{survival::coxph()}: \code{cox_fit}, \code{hr},
+\code{hr_ci}, \code{pval}, \code{score}, \code{cox_text} and \code{se}, the standard error of the
+log hazard ratio behind \code{hr_ci} and \code{pval} (the robust one of \code{coxph(robust = TRUE)};
+\code{NA} when the model could not be fitted). \code{score} is the score test of the model: with no
+weights, or with all positive weights equal, \code{summary(cox_fit)$sctest}; with subject weights
+that are not all equal, the robust score test \code{summary(cox_fit)$robscore} (the model-based
+one reads the weights as counts).}
+\item{logrank_results}{List with \code{chisq}, \code{pval}, \code{logrank_text} and \code{method}.
+With no weights, or with all positive weights equal, the test of \code{survival::survdiff()}
+(\code{method = "survdiff"}; \code{rho} from the scheme when it is \code{"fh"}). With subject weights
+that are not all equal \code{survdiff()} has no counterpart, and the result is the robust score
+test at 0 of the weighted Cox model (\code{coxph(weights = , init = 0, iter.max = 0, robust = TRUE,
+    ties = "breslow")} on the positive-weight rows, strata included; \code{method =
+    "coxph_robust_score"}): the \code{rho = 0} test whatever the scheme. Its \code{chisq} equals
+\code{z.score^2} (\code{z.score_stratified^2}) for Fleming-Harrington (0, 0) weights, so
+\code{\link{check_results}} agrees on weighted data.}
+\item{z.score}{Standardized weighted log-rank test statistic (with subject weights that are not
+all equal, standardized by the score-residual variance; see the section on subject weights)}
 \item{at_points}{Vector of all time points used in calculations}
 \item{surv0, surv1}{Kaplan-Meier survival estimates for control and treatment groups}
 \item{sig2_surv0, sig2_surv1}{Variance estimates for survival curves}
 \item{survP}{Pooled survival estimates}
 \item{survG}{Censoring distribution estimates}
 \item{quantile_results}{Data frame with median survival and confidence intervals by group}
-\item{lr, sig2_lr}{Weighted log-rank statistic and its variance}
+\item{lr, sig2_lr}{Weighted log-rank statistic and its variance (\code{get_score} holds the same as
+returned by \code{\link{wlr_cumulative}}; \code{zlogrank_text} is the one-sided p-value of \code{z.score})}
 \item{riskpoints0, riskpoints1}{Risk set counts at specified time points}
-\item{z.score_stratified}{Stratified z-score (if stratified analysis)}
+\item{z.score_stratified}{Stratified z-score (if stratified analysis), with \code{lr_stratified} and
+\code{sig2_lr_stratified}}
+\item{ess}{Data frame with one row per arm, in the order of \code{quantile_results}
+(\code{arms[1]}, the treated arm, then \code{arms[2]}): \code{group}; \code{n}, the rows of the arm
+with positive weight; \code{ess}, the effective sample size
+\eqn{(\sum w)^2 / \sum w^2}{(sum w)^2 / sum(w^2)} over those rows; and \code{ratio = ess / n}.
+Without weights, and with constant weights, \code{ess = n}. A ratio near 1 means the weights are
+even; a low ratio means that a few subjects carry most of the weight, and standard errors,
+intervals and tests can then be too optimistic, whether the weights are treated as known or
+as estimated. No warning or message depends on it.}
+\item{weight_variance}{\code{"known"} or \code{"estimated"}: how the weights were treated.}
+\item{ew_parts}{Only with \code{weight_variance = "estimated"}: list with \code{IF} and \code{dw}
+of \code{weight_model}, rows in the order of \code{time}; read by \code{\link{cox_rhogamma}},
+\code{\link{wlr_cumulative}} and \code{\link{wlr_dhat_estimates}}.}
 }
 }
 \description{
@@ -131,8 +174,162 @@ This function implements a comprehensive survival analysis framework supporting:
 }
 
 The function performs time-fixing using \code{survival::aeqSurv} to handle tied event times.
+
+Input checks: missing values (in any named column, including \code{strata.name}), non-finite or
+negative times, negative weights and an empty arm are errors; rows are never dropped silently.
+Zero weights are allowed: those rows contribute nothing, and the Cox model and log-rank test are
+fitted on the positive-weight rows. Zero-weight rows do not affect which variance formula runs
+either: whether the weights are "all equal" is decided on the positive weights, so a 0/1 weight
+column gives the results of the positive-weight rows analysed without weights. A stratum in which one arm is empty contributes nothing to the
+stratified statistics (that arm's stratum curve is \code{NA}). On degenerate data (an arm without events, no events at all, one subject
+per arm) a result is still returned; quantities that cannot be computed are \code{NA}, with one
+warning that says why.
 For stratified analyses, stratum-specific estimates are computed and combined appropriately.
 }
+\section{Variance of the Kaplan-Meier estimate}{
+
+With no weights, or with all weights equal, the variance of a Kaplan-Meier estimate is
+Greenwood's formula, and these results are unchanged. When the weights are not all equal it is
+the robust (infinitesimal-jackknife) variance
+\deqn{\widehat{Var}[\hat S(t)] = \hat S(t)^2 \sum_i w_i^2 \psi_i(t)^2,}{Var[S(t)] = S(t)^2 * sum_i w_i^2 psi_i(t)^2,}
+\deqn{\psi_i(t) = \frac{D_i 1(U_i \le t)}{Y_w(U_i) - dN_w(U_i)} - \sum_{s \le \min(t, U_i)} \frac{dN_w(s)}{Y_w(s)\{Y_w(s) - dN_w(s)\}},}{psi_i(t) = D_i 1(U_i <= t) / (Y_w(U_i) - dN_w(U_i)) - sum_{s <= min(t, U_i)} dN_w(s) / [Y_w(s) (Y_w(s) - dN_w(s))],}
+where \eqn{U_i}, \eqn{D_i} and \eqn{w_i} are subject \eqn{i}'s time, event indicator and weight,
+\eqn{Y_w(s)} is the weighted number at risk, \eqn{dN_w(s)} the weighted number of events at
+\eqn{s}, the sum runs over event times, and a term is 0 where
+\eqn{Y_w(s) - dN_w(s) \le 10^{-10} Y_w(s)}. It equals the standard error of
+\code{survival::survfit(weights = w, robust = TRUE)} (on the time-fixed data), reduces to
+Greenwood's formula at equal weights, and does not depend on the scale of the weights.
+With \code{draws > 0} and unequal weights the variance is instead the variance over resampling
+draws of \eqn{\sum_i G_i w_i \psi_i(t)} (standard-normal multipliers \eqn{G_i}), which estimates
+the same quantity; resampled curves for weighted data are built from the same per-subject
+contributions (see \code{\link{resampling_survival}}).
+By default the weights are treated as fixed and known. For weights estimated by a logistic
+propensity model, \code{weight_variance = "estimated"} carries their estimation into the standard
+error (section "Estimated weights" of \code{\link{df_counting}}). When the weights are extreme
+(low effective sample size) the standard error can be too small under either option.
+}
+
+\section{Variance of the log-rank and Cox score with subject weights}{
+
+With no subject weights, or with all subject weights equal, the weighted log-rank test and the
+weighted Cox estimate are computed as before, and their results are unchanged. When the subject
+weights are not all equal, the variance of the weighted score is the sum of squared per-subject
+score contributions,
+\deqn{\widehat{Var}\{U(\beta)\} = \sum_i \psi_i(\beta)^2,}{Var(U(b)) = sum_i psi_i(b)^2,}
+\deqn{\psi_i(\beta) = a_i \Big( D_i K(U_i) \{Z_i - \bar z(U_i, \beta)\} - e^{\beta Z_i} \sum_{s \le U_i} K(s) \{Z_i - \bar z(s, \beta)\} d\hat\Lambda(s, \beta) \Big),}{psi_i(b) = a_i ( D_i K(U_i) (Z_i - zbar(U_i, b)) - exp(b Z_i) sum_{s <= U_i} K(s) (Z_i - zbar(s, b)) dL(s, b) ),}
+where \eqn{U_i}, \eqn{D_i}, \eqn{Z_i} and \eqn{a_i} are subject \eqn{i}'s time, event indicator,
+arm (0/1) and subject weight, \eqn{K(s)} is the time weight of the scheme,
+\eqn{S_0(s, \beta) = \sum_j a_j 1(U_j \ge s) e^{\beta Z_j}}{S0(s, b) = sum_j a_j 1(U_j >= s) exp(b Z_j)},
+\eqn{\bar z(s, \beta) = \sum_j a_j 1(U_j \ge s) Z_j e^{\beta Z_j} / S_0(s, \beta)}{zbar(s, b) = sum_j a_j 1(U_j >= s) Z_j exp(b Z_j) / S0(s, b)} and
+\eqn{d\hat\Lambda(s, \beta) = \sum_j a_j D_j 1(U_j = s) / S_0(s, \beta)}{dL(s, b) = sum_j a_j D_j 1(U_j = s) / S0(s, b)}.
+Sums over \eqn{s} run over distinct times (events at a tied time are added up), and a term whose
+\eqn{S_0} is 0 is 0. The score itself, \eqn{-\sum_i \psi_i(\beta)}{-sum_i psi_i(b)}, is the one
+computed before and does not change, and neither does any point estimate. The log-rank z-score
+is the score at \eqn{\beta = 0} over \eqn{\sqrt{\sum_i \psi_i(0)^2}}{sqrt(sum_i psi_i(0)^2)}; the
+variance of the log hazard ratio estimate is
+\eqn{\sum_i \psi_i(\hat\beta)^2 / i(\hat\beta)^2}{sum_i psi_i(bhat)^2 / i(bhat)^2} with
+\eqn{i(\hat\beta)}{i(bhat)} the information (unchanged); in a stratified analysis the
+contributions are computed within each stratum and the score and its variance are sums over
+strata. For Fleming-Harrington (0, 0) weights this is the robust variance of
+\code{survival::coxph(weights = w, robust = TRUE, ties = "breslow")}: the same robust score test
+and the same robust standard error. Results no longer depend on how the weights are scaled
+(weights \code{w}, \code{10 * w} and \code{w / sum(w)} give the same z-score and standard error).
+By default the weights are treated as fixed and known. For weights estimated by a logistic
+propensity model, \code{weight_variance = "estimated"} carries their estimation into the test and
+the intervals (section "Estimated weights"). When the weights are extreme (low effective sample
+size) the intervals can be too short under either option.
+}
+
+\section{Estimated weights}{
+
+Propensity-score weights are estimated from the data. \code{weight_variance} says how standard
+errors, intervals, bands and tests treat them.
+\describe{
+\item{\code{"known"} (default)}{The weights are fixed, known numbers: the formulas of the two
+sections above. \code{weight_model} is ignored.}
+\item{\code{"estimated"}}{The weights were estimated by a logistic regression for the treatment,
+given as \code{weight_model} (the object returned by \code{\link{ps_weights}}), and that
+estimation is carried into the inference.}
+}
+Estimates never change: survival curves, their difference, RMST, the log-rank score, hazard
+ratios, counts and risk tables are identical under the two options. Only standard errors,
+intervals, bands and tests differ.
+
+Notation. There are \eqn{n} subjects, the rows analysed. Subject \eqn{i} has arm \eqn{A_i},
+row \eqn{x_i} of the model matrix of the propensity model (\eqn{p} columns), fitted probability
+\eqn{e_i} and weight \eqn{w_i} (written \eqn{a_i} in the score formulas above). The influence of
+subject \eqn{i} on the fitted coefficients and the derivative of its weight in the coefficients are
+\deqn{IF_i = \Big\{\sum_j x_j x_j' e_j (1 - e_j)\Big\}^{-1} x_i (A_i - e_i), \qquad dw_i = -\frac{1 - e_i}{e_i} x_i \ (A_i = 1), \quad dw_i = \frac{e_i}{1 - e_i} x_i \ (A_i = 0)}{IF_i = { sum_j x_j x_j' e_j (1 - e_j) }^(-1) x_i (A_i - e_i);  dw_i = -((1 - e_i) / e_i) x_i (treated),  dw_i = (e_i / (1 - e_i)) x_i (control)}
+(for stabilised weights \eqn{w_i} and \eqn{dw_i} are multiplied by the arm proportion).
+
+Kaplan-Meier estimate of a group \eqn{g} (an arm; an arm within a stratum; all subjects). With
+\eqn{\psi_i(t)}{psi_i(t)} the influence value of the section "Variance of the Kaplan-Meier
+estimate", computed from the group's own weighted counts,
+\deqn{D_g(t) = \sum_{k \in g} \psi_k(t)\, dw_k, \qquad \Phi_i(t) = 1(i \in g)\, w_i \psi_i(t) + IF_i' D_g(t) \quad (i = 1, \ldots, n),}{D_g(t) = sum_{k in g} psi_k(t) dw_k,   Phi_i(t) = 1(i in g) w_i psi_i(t) + IF_i' D_g(t)   (i = 1, ..., n),}
+\deqn{\widehat{Var}[\hat S_g(t)] = \hat S_g(t)^2 \sum_{i=1}^n \Phi_i(t)^2.}{Var[S_g(t)] = S_g(t)^2 * sum_{i=1}^n Phi_i(t)^2.}
+Every subject contributes, also those outside the group, through the model. The variance of the
+difference of the two arms is
+\deqn{\widehat{Var}[\hat S_1(t) - \hat S_0(t)] = \sum_{i=1}^n \{\hat S_1(t) \Phi^1_i(t) - \hat S_0(t) \Phi^0_i(t)\}^2,}{Var[S_1(t) - S_0(t)] = sum_{i=1}^n ( S_1(t) Phi1_i(t) - S_0(t) Phi0_i(t) )^2,}
+which is \strong{not} the sum of the two arm variances: the arms share the model's coefficients.
+A resampled curve of arm \eqn{a} is
+\eqn{-\hat S_a(t) \sum_{i=1}^n G_i \Phi^a_i(t)}{-S_a(t) sum_{i=1}^n G_i Phi^a_i(t)} with the
+standard-normal multipliers \eqn{G_i} that \code{\link{KM_diff}} generates in any case; the
+resampled difference curves, the simultaneous band and the RMST variance and band of
+\code{\link{cumulative_rmst_bands}} follow from them unchanged.
+
+Score of the log-rank test and of the weighted Cox estimate. With
+\eqn{\psi_i(\beta)}{psi_i(b)} the contribution of the section "Variance of the log-rank and Cox
+score with subject weights", computed within each stratum,
+\deqn{B(\beta) = \sum_{j=1}^n \frac{\psi_j(\beta)}{a_j}\, dw_j, \qquad \psi^{ew}_i(\beta) = \psi_i(\beta) + IF_i' B(\beta), \qquad \widehat{Var}\{U(\beta)\} = \sum_{i=1}^n \psi^{ew}_i(\beta)^2.}{B(b) = sum_{j=1}^n (psi_j(b) / a_j) dw_j,   psi_ew_i(b) = psi_i(b) + IF_i' B(b),   Var(U(b)) = sum_{i=1}^n psi_ew_i(b)^2.}
+The log-rank z-score, the variance of the log hazard ratio estimate (the sum at
+\eqn{\hat\beta}{bhat} over the squared information) and a resampled score
+(\eqn{-\sum_i G_i \psi^{ew}_i(\beta)}{-sum_i G_i psi_ew_i(b)}) are formed as before with
+\eqn{\psi^{ew}}{psi_ew} in place of \eqn{\psi}{psi}. In a stratified analysis the variance is this
+single sum over all subjects, not a sum of per-stratum variances. The cumulative variance of
+\code{\link{wlr_cumulative}} is \eqn{\sum_i \{c_i(t) + IF_i' B(t)\}^2}{sum_i (c_i(t) + IF_i' B(t))^2}
+with \eqn{c_i(t)} the contribution of subject \eqn{i} to the score up to \eqn{t} and
+\eqn{B(t) = \sum_j \{c_j(t) / a_j\} dw_j}{B(t) = sum_j (c_j(t) / a_j) dw_j}; in
+\code{\link{wlr_dhat_estimates}} the contribution to the survival difference is
+\eqn{d_i + IF_i' (\hat S_0 D_0 - \hat S_1 D_1)}{d_i + IF_i' (S_0 D_0 - S_1 D_1)} at the grid point
+read for \code{tzero}, and the covariance uses both adjusted contributions. The outputs of
+\code{df_counting()} that come from the \code{survival} package (\code{logrank_results},
+\code{cox_results$score}, \code{$se}, \code{$hr_ci}, \code{$pval}) carry the same adjustment,
+applied to \code{coxph()}'s weighted score and dfbeta residuals \eqn{r}:
+\eqn{r_i + IF_i' \sum_j (r_j / w_j) dw_j}{r_i + IF_i' sum_j (r_j / w_j) dw_j}.
+
+How to use it. Fit the propensity model on exactly the rows to be analysed with
+\code{\link{ps_weights}}, put its weights in a column of \code{df}, and pass
+\code{weight_variance = "estimated"} and \code{weight_model} to \code{df_counting()},
+\code{\link{KM_diff}}, \code{\link{cumulative_rmst_bands}} or \code{\link{plotKM.band_subgroups}}.
+\code{\link{cox_rhogamma}}, \code{\link{wlr_cumulative}} and \code{\link{wlr_dhat_estimates}} take the
+option from the \code{df_counting()} result they are given (its elements \code{weight_variance} and
+\code{ew_parts}). The rows of \code{df}, the treatment column and the weight column must be those of
+\code{weight_model}; anything else is an error.
+
+Scope and limits of this version.
+\itemize{
+\item A logistic \code{glm} for a binary treatment, fitted on exactly the rows analysed. For
+weights from any other model use \code{"known"}.
+\item A subgroup analysis that reuses weights from a model fitted on the full sample must use
+\code{"known"}: the model's rows are then not the rows analysed. (The subgroup curves of
+\code{plotKM.band_subgroups()} are point estimates and are not affected.)
+\item \code{draws > 0} (the resampling-based pointwise variance) is not available with
+\code{"estimated"}; \code{draws.band} and the resampling of \code{cox_rhogamma()} are.
+\item The time weights of the scheme (Fleming-Harrington and the others) depend on the weighted
+pooled curve; that dependence on the estimated weights is ignored.
+\item With stabilised weights the arm proportion is treated as a fixed number. The Kaplan-Meier
+quantities do not depend on that: they are unchanged when an arm's weights are multiplied by a
+constant.
+\item With \code{"estimated"} the influence-based formulas always run; whether the weights are all
+equal is not tested.
+\item Carrying the estimation through does not repair extreme weights: when the effective sample
+size (\code{df_counting()$ess}) is a small fraction of an arm, standard errors, intervals and
+tests can be too optimistic under either option.
+}
+The device of carrying the estimation of a nuisance quantity into the inference by perturbing its
+estimate is that of Leon, Cai and Wei (2009); it is used here in linearised form.
+}
+
 \section{Weighting Schemes}{
 
 \describe{
@@ -186,20 +383,25 @@ Fleming, T. R. and Harrington, D. P. (1991). Counting Processes and Survival Ana
 
 Magirr, D. and Burman, C. F. (2019). Modestly weighted logrank tests.
 Statistics in Medicine, 38(20), 3782-3790.
+
+Leon, L. F., Cai, T. and Wei, L. J. (2009). Robust inferences for covariate effects on survival
+time with censored linear regression models. Statistics in Biosciences, 1, 50-64.
+\doi{10.1007/s12561-009-9002-5}
 }
 \seealso{
 \code{\link[survival]{coxph}}, \code{\link[survival]{survdiff}}, \code{\link[survival]{survfit}}
 \code{\link{cox_rhogamma}} for weighted Cox models
 \code{\link{KM_diff}} for Kaplan-Meier differences
 
-Other survival_analysis: 
-\code{\link{KM_diff}()},
-\code{\link{cox_rhogamma}()},
-\code{\link{wt.rg.S}()}
+Other survival_analysis:
+\code{\link[=KM_diff]{KM_diff()}},
+\code{\link[=cox_rhogamma]{cox_rhogamma()}},
+\code{\link[=ps_weights]{ps_weights()}},
+\code{\link[=wt.rg.S]{wt.rg.S()}}
 
-Other weighted_tests: 
-\code{\link{cox_rhogamma}()},
-\code{\link{wt.rg.S}()}
+Other weighted_tests:
+\code{\link[=cox_rhogamma]{cox_rhogamma()}},
+\code{\link[=wt.rg.S]{wt.rg.S()}}
 }
 \concept{survival_analysis}
 \concept{weighted_tests}

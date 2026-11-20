@@ -2,6 +2,8 @@
 #' Plot confidence interval polygon for KM curve
 #'
 #' Plots a shaded polygon representing the confidence interval for a Kaplan-Meier survival curve.
+#' Limits use the log transform; the upper limit is capped at 1 and, where survival is 0, the band
+#' closes onto the curve.
 #'
 #' @param x Numeric vector of time points.
 #' @param surv Numeric vector of survival probabilities.
@@ -15,8 +17,11 @@
 
 plot_km_confint_polygon <- function(x, surv, se, conf_level, col) {
   z <- qnorm(1 - (1 - conf_level) / 2)
-  lower <- exp(log(surv) - z * se / surv)
-  upper <- exp(log(surv) + z * se / surv)
+  # log-transform limits, upper capped at 1; where S = 0 the band closes onto the curve
+  lower <- upper <- surv
+  ok <- !is.na(surv) & surv > 0
+  lower[ok] <- exp(log(surv[ok]) - z * se[ok] / surv[ok])
+  upper[ok] <- pmin(exp(log(surv[ok]) + z * se[ok] / surv[ok]), 1)
   polygon(
     c(x[order(x)], rev(x[order(x)])),
     c(lower[order(x)], rev(upper[order(x)])),
@@ -27,6 +32,10 @@ plot_km_confint_polygon <- function(x, surv, se, conf_level, col) {
 #' Plot KM curves for two groups with optional confidence intervals and censoring marks
 #'
 #' Plots Kaplan-Meier survival curves for two groups, with options for confidence intervals and censoring marks.
+#' Each curve is drawn as the right-continuous step function from \code{time.zero} (where S = 1) to the
+#' group's last observed time; the confidence band (log transform, upper limit capped at 1, closing onto
+#' the curve where S = 0) is a step band over the same range. The two bands are filled with
+#' semi-transparent grey (control) and light blue (treated), so each stays visible where they overlap.
 #'
 #' @param at_points Numeric vector of time points for plotting.
 #' @param S0.KM Numeric vector of survival probabilities for group 0.
@@ -53,11 +62,12 @@ plot_km_confint_polygon <- function(x, surv, se, conf_level, col) {
 #' @param conf.int Logical; show confidence intervals (default FALSE).
 #' @param conf_level Confidence level (default 0.95).
 #' @param censor.cex Numeric; censoring mark size (default 1.0).
-#' @param time.zero Numeric; time zero value for risk table alignment (default 0).
+#' @param time.zero Numeric; time at which the curves start at S = 1 (default 0).
 #' @param tpoints.add Numeric vector; additional time points to include (default c(0)).
 #' @param ... Additional arguments to plot.
 #'
 #' @importFrom graphics plot lines legend title axis box points
+#' @importFrom grDevices adjustcolor
 #' @return Invisibly returns NULL. Used for plotting side effects.
 #' @export
 
@@ -80,13 +90,19 @@ plot_km_curves_counting <- function(
   axis(2, las = 2)
   axis(1, at = risk.points, labels = risk.points.label)
 
+  # Step-function vertices from time.zero (S = 1) to each group's last observed time,
+  # and the step confidence band (one internal helper: km_step_vertices())
+  v0 <- km_step_vertices(at_points, S0.KM, idv0, se = se0.KM, conf_level = conf_level, time.zero = time.zero)
+  v1 <- km_step_vertices(at_points, S1.KM, idv1, se = se1.KM, conf_level = conf_level, time.zero = time.zero)
+
   if (conf.int && !is.null(se0.KM) && !is.null(se1.KM)) {
-    plot_km_confint_polygon(at_points[idv0], S0.KM[idv0], se0.KM[idv0], conf_level, "lightgrey")
-    plot_km_confint_polygon(at_points[idv1], S1.KM[idv1], se1.KM[idv1], conf_level, "lightblue")
+    # semi-transparent fills, so that each band stays visible where the two overlap
+    polygon(v0$band_x, v0$band_y, col = adjustcolor("lightgrey", alpha.f = 0.5), border = FALSE)
+    polygon(v1$band_x, v1$band_y, col = adjustcolor("lightblue", alpha.f = 0.5), border = FALSE)
   }
 
-  lines(at_points[idv1], S1.KM[idv1], type = "s", lty = ltys[1], col = col.1, lwd = lwds[1])
-  lines(at_points[idv0], S0.KM[idv0], type = "s", lty = ltys[2], col = col.0, lwd = lwds[2])
+  lines(v1$x, v1$y, type = "s", lty = ltys[1], col = col.1, lwd = lwds[1])
+  lines(v0$x, v0$y, type = "s", lty = ltys[2], col = col.0, lwd = lwds[2])
 
   if (show.ticks && !is.null(cens0)) {
     points(cens0, S0.KM[idx0], pch = 3, col = col.0, cex = censor.cex)
@@ -273,7 +289,7 @@ add_legends <- function(dfcount, show.cox, cox.cex, put.legend.cox, show.logrank
 #' @param xmin Additional graphical and calculation parameters.
 #' @param xmax Additional graphical and calculation parameters.
 #' @param x.truncate Additional graphical and calculation parameters.
-#' @param time.zero Numeric; time zero value for risk table alignment (default: 0).
+#' @param time.zero Numeric; time at which the curves start at S = 1 (default: 0).
 #' @param tpoints.add Numeric vector; additional time points to include (default: c(0)).
 #' @return Invisibly returns NULL. Used for plotting side effects.
 #' @importFrom graphics plot lines legend title axis box abline par points
@@ -335,7 +351,8 @@ KM_plot_2sample_weighted_counting <- function(
     risk.points = risk.points, risk.points.label = risk.points.label,
     xlim = c(xmin, ifelse(is.null(xmax), max(c(at_points)), xmax)),
     show.ticks = show.ticks, cens0 = cens0, cens1 = cens1,
-    censor.cex = censor.cex, conf.int = conf.int, conf_level = conf_level, se1.KM = se1.KM, se0.KM = se0.KM
+    censor.cex = censor.cex, conf.int = conf.int, conf_level = conf_level, se1.KM = se1.KM, se0.KM = se0.KM,
+    time.zero = time.zero
   )
 
   if (risk.set) {
@@ -357,13 +374,18 @@ KM_plot_2sample_weighted_counting <- function(
 #'
 #' @param df Data frame containing survival data.
 #' @param tte.name Name of the time-to-event column.
-#' @param event.name Name of the event indicator column (0/1).
+#' @param event.name Name of the event indicator column (0/1; logical and 1/2 coding as in \code{survival::Surv} are also accepted).
 #' @param treat.name Name of the treatment group column (0/1).
 #' @param weight.name Optional name of the weights column.
 #' @param sg_labels Character vector of subgroup definitions (as logical expressions).
 #' @param ltype Line type for curves (default: "s").
 #' @param lty Line style for curves (default: 1).
-#' @param draws Number of draws for resampling (default: 20).
+#' @param draws Number of draws for the resampling-based pointwise variance, passed to
+#'   \code{\link{KM_diff}} (default: 0). With the default the pointwise standard error, the
+#'   pointwise limits and the standardisation of the simultaneous band use the analytic variance
+#'   (Greenwood's formula; the robust variance when the weights are not all equal). \code{draws > 0}
+#'   only has an effect when the weights are not all equal: the variance is then the variance over
+#'   that many resampling draws. The default was 20 before version 0.2.0.
 #' @param lwd Line width for curves (default: 2).
 #' @param sg_colors Colors for subgroup curves.
 #' @param color Color for confidence band polygon (default: "lightgrey").
@@ -390,13 +412,38 @@ KM_plot_2sample_weighted_counting <- function(
 #' @param time.zero.label Additional graphical and calculation parameters.
 #' @param xlabel Additional graphical and calculation parameters.
 #' @param ylabel Additional graphical and calculation parameters.
-#' @param Maxtau Additional graphical and calculation parameters.
+#' @param Maxtau Upper end of the time range. By default the smaller of the two arms' last event
+#'   times; it must be supplied when an arm has no events.
 #' @param seedstart Additional graphical and calculation parameters.
 #' @param ylim Additional graphical and calculation parameters.
-#' @param draws.band Number of draws for simultaneous confidence bands (default: 20).
+#' @param draws.band Number of draws for the simultaneous confidence band (default: 1000); \code{0}
+#'   draws the pointwise limits only. The band's critical value is a quantile of the suprema of that
+#'   many resampled curves. The default was 20 before version 0.2.0, which left the critical value to
+#'   20 draws; a call that supplies \code{draws.band} is unaffected.
 #' @param qtau Quantile for time range in simultaneous bands (default: 0.025).
 #' @param show_resamples Logical; whether to plot resampled curves (default: FALSE).
 #' @param modify_tau Logical; restrict time range for bands.
+#' @param weight_variance How the weights are treated in standard errors, intervals, bands and tests.
+#'   \code{"known"} (default): as fixed, known numbers. \code{"estimated"}: as estimated by the logistic
+#'   propensity model given in \code{weight_model}, whose estimation is carried into the inference. Estimates
+#'   never change. See the section "Estimated weights".
+#' @param weight_model With \code{weight_variance = "estimated"}, the object returned by
+#'   \code{\link{ps_weights}} for the rows of \code{df}, in the same order; its weights must be the column
+#'   \code{weight.name}. Ignored with \code{"known"}.
+#' @details The pointwise standard error of the difference, the pointwise limits and the
+#'   standardisation of the simultaneous band come from \code{\link{KM_diff}} with the \code{draws} and
+#'   \code{draws.band} given here. Since version 0.2.0 the default is \code{draws = 0}: the pointwise
+#'   variance is the analytic one (Greenwood's formula, or the robust variance when the weights are
+#'   not all equal). Before, the default \code{draws = 20} made the pointwise standard error of a
+#'   weighted plot, and with it the band, a 20-draw resampling variance. Plots without weights, or
+#'   with all weights equal, are numerically unaffected by \code{draws}. Since version 0.2.0 the
+#'   default of \code{draws.band} is 1000 (it was 20), so the critical value of the simultaneous band
+#'   of a call that does not pass \code{draws.band} rests on 1000 resampled curves. Zero-weight rows
+#'   contribute nothing and do not affect which variance formula runs.
+#'
+#'   \code{weight_variance} and \code{weight_model} are passed to the overall \code{KM_diff()} call
+#'   (pointwise limits and band). The subgroup curves are point estimates and are computed as before.
+#' @inheritSection df_counting Estimated weights
 #' @return (Invisible) list containing KM_diff results, time points, subgroup curves, risk tables, and confidence intervals.
 #' @importFrom graphics plot lines legend title axis box polygon matplot
 #' @export
@@ -404,7 +451,7 @@ KM_plot_2sample_weighted_counting <- function(
 plotKM.band_subgroups <- function(
     df, tte.name, event.name, treat.name, weight.name = NULL,
     sg_labels = NULL,
-    ltype = "s", lty = 1, draws = 20, lwd = 2,
+    ltype = "s", lty = 1, draws = 0, lwd = 2,
     sg_colors = NULL, color="lightgrey",
     ymax.pad = 0.01, ymin.pad = -0.01,
     taus = c(-Inf, Inf), yseq_length = 5, cex_Yaxis = 0.8, risk_cex = 0.8,
@@ -412,33 +459,36 @@ plotKM.band_subgroups <- function(
     y.risk1 = NULL, y.risk2 = NULL, ymin2 = NULL, risk_offset = NULL, risk.pad = 0.01,
     risk_delta = 0.0275, tau_add = NULL, time.zero.pad = 0, time.zero.label = 0.0,
     xlabel = NULL, ylabel = NULL, Maxtau = NULL, seedstart = 8316951,
-    ylim = NULL, draws.band = 20, qtau = 0.025, show_resamples = FALSE, modify_tau = FALSE
+    ylim = NULL, draws.band = 1000, qtau = 0.025, show_resamples = FALSE, modify_tau = FALSE,
+    weight_variance = c("known", "estimated"), weight_model = NULL
 ) {
+  weight_variance <- match.arg(weight_variance)
   # Input checks
 
-  required_cols <- c(tte.name, event.name, treat.name, weight.name)
-  missing_cols <- setdiff(required_cols, names(df))
-  if (length(missing_cols) > 0) {
-    stop(paste("Missing required columns in df:", paste(missing_cols, collapse = ", ")))
-  }
+  # Columns present; no NA; times finite and >= 0; event 0/1, logical or 1/2; weights >= 0;
+  # both arms non-empty (errors name the column and the problem)
+  vin <- ws_validate_survdata(df, tte.name, event.name, treat.name, weight.name)
+  # 1/2 event coding: use the 0/1 recoding, so that subgroup subsets cannot be misread
+  if (any(vin$event != df[[event.name]])) df[[event.name]] <- vin$event
 
   if (length(sg_labels) != length(sg_colors)) stop("SG labels and colors do not match")
   if (is.null(risk_offset)) risk_offset <- (1 + length(sg_labels)) * risk_delta
   if (is.null(ylabel)) ylabel <- expression(delta(t) == hat(S)[1](t) - hat(S)[0](t))
   if (is.null(xlabel)) xlabel <- "Months"
 
-  if (!is.numeric(df[[tte.name]])) stop("Time-to-event column must be numeric.")
-  if (!all(df[[event.name]] %in% c(0, 1))) stop("Event column must be binary (0/1).")
-  if (!all(df[[treat.name]] %in% c(0, 1))) stop("Treatment column must be binary (0/1).")
-  if (!is.null(weight.name) && !all(df[[weight.name]] >= 0)) stop("Weights must be non-negative.")
-
-
   # ITT
   Y <- df[[tte.name]]
-  E <- df[[event.name]]
+  E <- vin$event
   Treat <- df[[treat.name]]
-  maxe_0 <- max(Y[E == 1 & Treat == 0])
-  maxe_1 <- max(Y[E == 1 & Treat == 1])
+  no_ev <- c(!any(E == 1 & Treat == 0), !any(E == 1 & Treat == 1))
+  if (is.null(Maxtau) && any(no_ev)) {
+    stop(sprintf(paste0("max_tau is undefined: the %s no events (max_tau is the smaller of the two arms' last event times). ",
+                        "Supply Maxtau to set the time range."),
+                 if (all(no_ev)) "control and treatment arms have" else if (no_ev[1]) "control arm has" else "treatment arm has"),
+         call. = FALSE)
+  }
+  maxe_0 <- suppressWarnings(max(Y[E == 1 & Treat == 0]))  # -Inf only when Maxtau is supplied
+  maxe_1 <- suppressWarnings(max(Y[E == 1 & Treat == 1]))
   max_tau <- min(c(maxe_0, maxe_1))
   if (!is.null(Maxtau)) max_tau <- Maxtau
   if (!is.null(tau_add)){
@@ -463,7 +513,8 @@ plotKM.band_subgroups <- function(
     df = df, tte.name = tte.name, event.name = event.name, weight.name = weight.name,
     treat.name = treat.name, at_points = at_points, alpha = 0.05, risk.points = riskpoints,
     modify_tau = modify_tau,
-    draws = draws, seedstart = seedstart, draws.band = draws.band, qtau = qtau, show_resamples = show_resamples
+    draws = draws, seedstart = seedstart, draws.band = draws.band, qtau = qtau, show_resamples = show_resamples,
+    weight_variance = weight_variance, weight_model = weight_model
   )
 
   # Add max_tau to fit
@@ -506,6 +557,8 @@ plotKM.band_subgroups <- function(
   # Here we only want point estimates (SE's not considered for subgroup plot)
   for (i in seq_along(sg_flags)) {
     df_sg <- df[sg_flags[[i]], ]
+    ws_validate_survdata(df_sg, tte.name, event.name, treat.name, weight.name,
+                         context = sprintf("Subgroup '%s'", sg_labels[i]))
     Y_sg <- df_sg[[tte.name]]
     E_sg <- df_sg[[event.name]]
     Treat_sg <- df_sg[[treat.name]]

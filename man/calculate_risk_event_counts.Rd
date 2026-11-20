@@ -20,8 +20,44 @@ calculate_risk_event_counts(U, D, W, at_points, draws = 0, seedstart = 816951)
 \item{seedstart}{Random seed for draws (default 816951).}
 }
 \value{
-List with ybar (risk set counts), nbar (event counts), sig2w_multiplier (variance term).
+List with ybar (risk set counts), nbar (event counts), sig2w_multiplier (variance term:
+its cumulative sum times \eqn{\hat S(t)^2} is the variance of the Kaplan-Meier estimate, see
+\code{\link{KM_estimates}}).
 }
 \description{
 Calculates risk set and event counts for a group at specified time points, with variance estimation.
+Passed to \code{\link{KM_estimates}}, these give the Kaplan-Meier estimate only when
+\code{at_points} holds every event time of the group.
 }
+\details{
+\code{sig2w_multiplier} is, with no weights or all weights equal, the per-time-point
+Greenwood term \eqn{dN(s) / [Y(s)\{Y(s) - dN(s)\}]} (0 where \eqn{Y(s) = 0} or
+\eqn{Y(s) - dN(s) \le 10^{-10} Y(s)}). With weights that are not all equal it is the successive
+differences, along \code{at_points}, of \eqn{\sum_i w_i^2 \psi_i(t)^2} (the robust variance below
+divided by \eqn{\hat S(t)^2}), or, when \code{draws > 0}, of the variance over draws of
+\eqn{\sum_i G_i w_i \psi_i(t)}; individual differences may be negative, only their cumulative
+sum is meaningful.
+}
+\section{Variance of the Kaplan-Meier estimate}{
+
+With no weights, or with all weights equal, the variance of a Kaplan-Meier estimate is
+Greenwood's formula, and these results are unchanged. When the weights are not all equal it is
+the robust (infinitesimal-jackknife) variance
+\deqn{\widehat{Var}[\hat S(t)] = \hat S(t)^2 \sum_i w_i^2 \psi_i(t)^2,}{Var[S(t)] = S(t)^2 * sum_i w_i^2 psi_i(t)^2,}
+\deqn{\psi_i(t) = \frac{D_i 1(U_i \le t)}{Y_w(U_i) - dN_w(U_i)} - \sum_{s \le \min(t, U_i)} \frac{dN_w(s)}{Y_w(s)\{Y_w(s) - dN_w(s)\}},}{psi_i(t) = D_i 1(U_i <= t) / (Y_w(U_i) - dN_w(U_i)) - sum_{s <= min(t, U_i)} dN_w(s) / [Y_w(s) (Y_w(s) - dN_w(s))],}
+where \eqn{U_i}, \eqn{D_i} and \eqn{w_i} are subject \eqn{i}'s time, event indicator and weight,
+\eqn{Y_w(s)} is the weighted number at risk, \eqn{dN_w(s)} the weighted number of events at
+\eqn{s}, the sum runs over event times, and a term is 0 where
+\eqn{Y_w(s) - dN_w(s) \le 10^{-10} Y_w(s)}. It equals the standard error of
+\code{survival::survfit(weights = w, robust = TRUE)} (on the time-fixed data), reduces to
+Greenwood's formula at equal weights, and does not depend on the scale of the weights.
+With \code{draws > 0} and unequal weights the variance is instead the variance over resampling
+draws of \eqn{\sum_i G_i w_i \psi_i(t)} (standard-normal multipliers \eqn{G_i}), which estimates
+the same quantity; resampled curves for weighted data are built from the same per-subject
+contributions (see \code{\link{resampling_survival}}).
+By default the weights are treated as fixed and known. For weights estimated by a logistic
+propensity model, \code{weight_variance = "estimated"} carries their estimation into the standard
+error (section "Estimated weights" of \code{\link{df_counting}}). When the weights are extreme
+(low effective sample size) the standard error can be too small under either option.
+}
+

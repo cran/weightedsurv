@@ -219,6 +219,8 @@ extract_group_data <- function(time, delta, wgt, z, group = 1) {
 #' Calculate risk set and event counts at time points
 #'
 #' Calculates risk set and event counts for a group at specified time points, with variance estimation.
+#' Passed to \code{\link{KM_estimates}}, these give the Kaplan-Meier estimate only when
+#' \code{at_points} holds every event time of the group.
 #'
 #' @param U Numeric vector of times for group.
 #' @param D Numeric vector of event indicators for group.
@@ -226,48 +228,65 @@ extract_group_data <- function(time, delta, wgt, z, group = 1) {
 #' @param at_points Numeric vector of time points.
 #' @param draws Number of draws for variance estimation (default 0).
 #' @param seedstart Random seed for draws (default 816951).
-#' @return List with ybar (risk set counts), nbar (event counts), sig2w_multiplier (variance term).
+#' @return List with ybar (risk set counts), nbar (event counts), sig2w_multiplier (variance term:
+#'   its cumulative sum times \eqn{\hat S(t)^2} is the variance of the Kaplan-Meier estimate, see
+#'   \code{\link{KM_estimates}}).
+#' @details \code{sig2w_multiplier} is, with no weights or all weights equal, the per-time-point
+#'   Greenwood term \eqn{dN(s) / [Y(s)\{Y(s) - dN(s)\}]} (0 where \eqn{Y(s) = 0} or
+#'   \eqn{Y(s) - dN(s) \le 10^{-10} Y(s)}). With weights that are not all equal it is the successive
+#'   differences, along \code{at_points}, of \eqn{\sum_i w_i^2 \psi_i(t)^2} (the robust variance below
+#'   divided by \eqn{\hat S(t)^2}), or, when \code{draws > 0}, of the variance over draws of
+#'   \eqn{\sum_i G_i w_i \psi_i(t)}; individual differences may be negative, only their cumulative
+#'   sum is meaningful.
+#'
+#' @section Variance of the Kaplan-Meier estimate:
+#' With no weights, or with all weights equal, the variance of a Kaplan-Meier estimate is
+#' Greenwood's formula, and these results are unchanged. When the weights are not all equal it is
+#' the robust (infinitesimal-jackknife) variance
+#' \deqn{\widehat{Var}[\hat S(t)] = \hat S(t)^2 \sum_i w_i^2 \psi_i(t)^2,}{Var[S(t)] = S(t)^2 * sum_i w_i^2 psi_i(t)^2,}
+#' \deqn{\psi_i(t) = \frac{D_i 1(U_i \le t)}{Y_w(U_i) - dN_w(U_i)} - \sum_{s \le \min(t, U_i)} \frac{dN_w(s)}{Y_w(s)\{Y_w(s) - dN_w(s)\}},}{psi_i(t) = D_i 1(U_i <= t) / (Y_w(U_i) - dN_w(U_i)) - sum_{s <= min(t, U_i)} dN_w(s) / [Y_w(s) (Y_w(s) - dN_w(s))],}
+#' where \eqn{U_i}, \eqn{D_i} and \eqn{w_i} are subject \eqn{i}'s time, event indicator and weight,
+#' \eqn{Y_w(s)} is the weighted number at risk, \eqn{dN_w(s)} the weighted number of events at
+#' \eqn{s}, the sum runs over event times, and a term is 0 where
+#' \eqn{Y_w(s) - dN_w(s) \le 10^{-10} Y_w(s)}. It equals the standard error of
+#' \code{survival::survfit(weights = w, robust = TRUE)} (on the time-fixed data), reduces to
+#' Greenwood's formula at equal weights, and does not depend on the scale of the weights.
+#' With \code{draws > 0} and unequal weights the variance is instead the variance over resampling
+#' draws of \eqn{\sum_i G_i w_i \psi_i(t)} (standard-normal multipliers \eqn{G_i}), which estimates
+#' the same quantity; resampled curves for weighted data are built from the same per-subject
+#' contributions (see \code{\link{resampling_survival}}).
+#' By default the weights are treated as fixed and known. For weights estimated by a logistic
+#' propensity model, \code{weight_variance = "estimated"} carries their estimation into the standard
+#' error (section "Estimated weights" of \code{\link{df_counting}}). When the weights are extreme
+#' (low effective sample size) the standard error can be too small under either option.
+#'
 #' @export
 
 calculate_risk_event_counts <- function(U, D, W, at_points, draws = 0, seedstart = 816951) {
   ybar <- colSums(outer(U, at_points, FUN = ">=") * W)
   nbar <- colSums(outer(U[D == 1], at_points, FUN = "<=") * W[D == 1])
-  dN <- diff(c(0, nbar))
-  # For un-weighted (all weights equal) return standard variance term
-  if(length(unique(W)) == 1){
-    # Greenwood
-    sig2w_multiplier <- ifelse(ybar > 0 & ybar > dN, dN / (ybar * (ybar-dN)), 0.0)
-    # Alternative with dN / (ybar^2)
-  }
-  if(length(unique(W)) > 1){
-    n <- length(U)
-    event_mat <- outer(U, at_points, FUN = "<=")
-    risk_mat  <- outer(U, at_points, FUN = ">=")
-    risk_w <- colSums(risk_mat *  W)
-    result <- switch(
-      as.integer(draws > 0) + 1,
-      {
-        # draws == 0
-        counting <- colSums(event_mat * (D * W))
-        dN_w <- diff(c(0, counting))
-        dJ <- ifelse(risk_w == 1, 0, (dN_w - 1) / (risk_w - 1))
-        dL <- ifelse(risk_w == 0, 0, dN_w / risk_w)
-        h2 <- ifelse(risk_w > 0, (1 / (risk_w)), 0)
-        sig2w_multiplier <- (h2 * (dN_w - dL))^2
-        sig2w_multiplier
-      },
-      {
-        # draws > 0
-        set.seed(seedstart)
-        G.draws <- matrix(rnorm(draws * n), ncol = draws)
-        counting_star_all <- t(event_mat * W) %*% (D * G.draws)
-        dN_star_all <- apply(counting_star_all, 2, function(x) diff(c(0, x)))
-        drisk_star <- sweep(dN_star_all, 1, risk_w, "/")
-        drisk_star[is.infinite(drisk_star) | is.nan(drisk_star)] <- 0
-        sig2w_multiplier <- apply(drisk_star, 1, var)
-        sig2w_multiplier
-      }
-    )
+  if (draws > 0 && ws_weights_unequal(W)) {
+    # Resampling (draws > 0 and weights not all equal): for multipliers G (same draws as before),
+    # the variance over draws of sum_i G_ib w_i psi_i(t) at each point (see ws_km_psi_parts()),
+    # returned as successive differences so that KM_estimates() reproduces it. The increments are
+    # not independent, so the variances of the increments are not summed.
+    G.draws <- ws_with_seed(seedstart, matrix(rnorm(draws * length(U)), ncol = draws))
+    M <- ws_km_ij_sorted(U, D, W, at_points, ybar, nbar, G = G.draws)
+    sig2w_multiplier <- diff(c(0, apply(M, 1, var)))
+  } else if (ws_weights_unequal(W)) {
+    # Weights not all equal: robust (infinitesimal-jackknife) variance, survfit(robust = TRUE).
+    # V(t) = sum_i w_i^2 psi_i(t)^2 (see ws_km_psi_parts()); KM_estimates() forms S^2 * cumsum of the
+    # multiplier, so the multiplier is the successive differences of V along at_points (individual
+    # differences may be negative).
+    V <- ws_km_ij_sorted(U, D, W, at_points, ybar, nbar)
+    sig2w_multiplier <- diff(c(0, V))
+  } else {
+    # No weights or all weights equal: Greenwood, as before.
+    #   sum_i w_i^2 dN_i(s) / [Y_w(s) (Y_w(s) - dN_w(s))], 0 where Y_w - dN_w <= 1e-10 Y_w or Y_w = 0.
+    # An empty group (e.g. an arm absent from a stratum) gives all zeros.
+    dN <- diff(c(0, nbar))
+    dN2 <- diff(c(0, colSums(outer(U[D == 1], at_points, FUN = "<=") * W[D == 1]^2)))
+    sig2w_multiplier <- ifelse(ybar > 0 & (ybar - dN) > 1e-10 * ybar, dN2 / (ybar * (ybar - dN)), 0.0)
   }
   list(ybar = ybar, nbar = nbar, sig2w_multiplier = sig2w_multiplier)
 }

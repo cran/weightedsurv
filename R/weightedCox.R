@@ -119,7 +119,17 @@ return(list(score = score, sig2U = sig2U, sig2_beta_asy = sig2_beta_asy, i_bhat 
 #' @param w_hat Numeric vector of weights.
 #' @param wt_rg Numeric vector of rho-gamma weights.
 #' @param score_only Logical; if TRUE, returns only the score.
-#' @return Numeric value of the score or a list with additional results.
+#' @return Numeric value of the score or, with \code{score_only = FALSE}, a list with \code{score},
+#'   \code{sig2_score} (variance of the score at \code{beta}), \code{sig2_beta_asy}
+#'   (\code{sig2_score / i_bhat^2}), \code{K_wt_rg} and \code{i_bhat} (the information).
+#' @details With \code{w_hat} absent or all equal, \code{sig2_score} and \code{sig2_beta_asy} are the
+#'   formulas used before (\code{\link{score_calculation}}) and are unchanged. When \code{w_hat} is not all
+#'   equal, \code{sig2_score} is the sum of squared per-subject score contributions
+#'   \eqn{\sum_i \psi_i(\beta)^2}{sum_i psi_i(beta)^2} described below and \code{sig2_beta_asy} is that
+#'   sum over \code{i_bhat^2}. The score, \code{K_wt_rg} and \code{i_bhat} are unchanged. \code{time} is
+#'   taken to be sorted, as \code{\link{df_counting}} returns it; the time weight of a tied time is
+#'   the one at its first observation.
+#' @inheritSection df_counting Variance of the log-rank and Cox score with subject weights
 #' @export
 
 cox_score_rhogamma <- function(beta, time, delta, z, w_hat = rep(1,length(time)), wt_rg = rep(1,length(time)), score_only = TRUE) {
@@ -151,6 +161,13 @@ cox_score_rhogamma <- function(beta, time, delta, z, w_hat = rep(1,length(time))
   sig2_beta_asy <- score_stats$sig2_beta_asy
   K_wt_rg <- score_stats$K_wt_rg
   i_bhat <- score_stats$i_bhat
+  # Subject weights not all equal: the variance of the score is the sum of squared per-subject
+  # score contributions psi_i(beta) (see ws_score_psi()), and the variance of the estimate is that
+  # sum over the squared information. Score, information and K are unchanged.
+  if (ws_weights_unequal(w_hat)) {
+    sig2U <- sum(ws_score_psi(time, delta, z, w_hat, K = wt_rg, beta = beta)$psi^2)
+    sig2_beta_asy <- sig2U / i_bhat^2
+  }
   return(list(score = score, sig2_score = sig2U, sig2_beta_asy = sig2_beta_asy, K_wt_rg = K_wt_rg, i_bhat = i_bhat))
   }
 }
@@ -198,6 +215,8 @@ cox_score_rhogamma <- function(beta, time, delta, z, w_hat = rep(1,length(time))
 #'   \item{cox_text_star}{Formatted string with HR and resampling CI (if draws > 0)}
 #'   \item{z.score_debiased}{Bias-corrected score statistic (if draws > 0)}
 #'   \item{zlogrank_text}{Formatted log-rank test result}
+#'   \item{weight_variance}{\code{"known"}, or \code{"estimated"} when \code{dfcount} was made with
+#'     \code{weight_variance = "estimated"}}
 #' }
 #'
 #' @details
@@ -215,6 +234,29 @@ cox_score_rhogamma <- function(beta, time, delta, z, w_hat = rep(1,length(time))
 #' }
 #'
 #' The score test at \eqn{\beta=0} corresponds to the weighted log-rank test.
+#'
+#' With subject weights that are not all equal (\code{dfcount$w_hat}), the variance of the score at 0
+#' and at \eqn{\hat\beta}{bhat} is the sum of squared per-subject score contributions (section below),
+#' so \code{fit$sig2_score}, \code{fit$z.score}, \code{fit$sig_bhat_asy}, \code{hr_ci_asy},
+#' \code{zlogrank_text} and \code{cox_text_asy} differ from versions before 0.2.0; with
+#' \code{draws > 0} the resampled scores are built from the same contributions
+#' (\code{\link{cox_rhogamma_resample}}), so the resampling standard error estimates the same
+#' quantity as \code{sig_bhat_asy}. The estimate \code{bhat}, the scores \code{u.beta} and \code{u.zero}
+#' and the time weights \code{wt_rg} do not change. \code{fit$z.score} equals
+#' \code{df_counting()$z.score} for the same scheme. With no weights or all weights equal, every
+#' result is as before.
+#'
+#' When \code{dfcount} was made with \code{weight_variance = "estimated"}
+#' (\code{\link{df_counting}} with a \code{\link{ps_weights}} object), the estimation of the weights is
+#' carried into \code{fit$sig2_score}, \code{fit$z.score}, \code{z.score}, \code{fit$sig_bhat_asy},
+#' \code{hr_ci_asy}, \code{zlogrank_text} and \code{cox_text_asy}, and with \code{draws > 0} into the
+#' resampled scores and everything computed from them (section "Estimated weights"). \code{bhat}, the
+#' scores, the information and the time weights are unchanged. The result's element
+#' \code{weight_variance} says which option was used. A direct call to
+#' \code{\link{cox_score_rhogamma}} is not affected.
+#'
+#' @inheritSection df_counting Variance of the log-rank and Cox score with subject weights
+#' @inheritSection df_counting Estimated weights
 #'
 #' @note The treatment variable in \code{dfcount} must be coded as 0=control, 1=experimental.
 #'
@@ -283,12 +325,26 @@ cox_rhogamma <- function(dfcount, scheme = "fh", scheme_params = list(rho = 0, g
   if (n0 + n1 != n) stop("z must be a (0/1) treatment group indicator")
 
 
+  # An arm without (positive-weight) events: the score equation has no finite root.
+  # The value returned is unchanged; the user is told the estimate is not identified.
+  no_ev <- c(sum(w_hat[z == 0 & delta == 1]) == 0, sum(w_hat[z == 1 & delta == 1]) == 0)
+  if (any(no_ev)) {
+    warning(sprintf("cox_rhogamma(): no events in the %s; the hazard-ratio estimate is not finite / not identified.",
+                    paste(c("control arm (z = 0)", "treatment arm (z = 1)")[no_ev], collapse = " and ")), call. = FALSE)
+  }
+
   # Find root of score function
   get_Cox <- find_cox_root(time, delta, z, w_hat, wt_rg)
 
-  if (is.na(get_Cox$root)) {
+  # A df_counting() result made with weight_variance = "estimated": the pieces of the propensity model,
+  # rows in the order of dfcount$time. The score contributions then carry the term through the model,
+  # psi_i(b) + IF_i' B(b) (see ws_score_ew()), whatever the weights.
+  ew <- if (identical(dfcount$weight_variance, "estimated") && is.list(dfcount$ew_parts)) dfcount$ew_parts else NULL
+  weight_variance <- if (is.null(ew)) "known" else "estimated"
+
+  if (!is.list(get_Cox) || is.na(get_Cox$root)) {
     warning("Root finding failed.")
-    return(list(bhat = NA, u.beta = NA, u.zero = NA, status = "fail"))
+    return(list(bhat = NA, u.beta = NA, u.zero = NA, status = "fail", weight_variance = weight_variance))
   }
 
   bhat_rhogamma <- get_Cox$root
@@ -300,6 +356,11 @@ cox_rhogamma <- function(dfcount, scheme = "fh", scheme_params = list(rho = 0, g
   i_zero <- temp$i_bhat
   K_zero <- temp$K_wt_rg
   sig2_score <- temp$sig2_score
+  if (!is.null(ew)) {
+    psi_zero <- ws_score_ew(ws_score_psi(time, delta, z, w_hat, K = wt_rg, beta = 0)$psi, w_hat, ew$IF, ew$dw)
+    sig2_score <- sum(psi_zero^2)
+    z.score <- u.zero / sqrt(sig2_score)
+  }
 
   ans$z.score <- z.score
 
@@ -308,6 +369,10 @@ cox_rhogamma <- function(dfcount, scheme = "fh", scheme_params = list(rho = 0, g
   sig_bhat_asy <- sqrt(temp$sig2_beta_asy)
   i_bhat <- temp$i_bhat
   K_wt_rg <- temp$K_wt_rg
+  if (!is.null(ew)) {
+    psi_bhat <- ws_score_ew(ws_score_psi(time, delta, z, w_hat, K = wt_rg, beta = bhat_rhogamma)$psi, w_hat, ew$IF, ew$dw)
+    sig_bhat_asy <- sqrt(sum(psi_bhat^2) / i_bhat^2)
+  }
 
   pval <- 1 - pnorm(z.score)
   ans$zlogrank_text <- paste0("logrank (1-sided) p = ", format_pval(pval, eps = 0.001, digits = lr.digits))
@@ -331,6 +396,8 @@ cox_rhogamma <- function(dfcount, scheme = "fh", scheme_params = list(rho = 0, g
     z = z,
     w_hat = w_hat
   )
+  # estimated weights: the pieces of the propensity model go along with the fit (for the resampling)
+  if (!is.null(ew)) fit_rhogamma$ew_parts <- ew
 
   ans$fit <- fit_rhogamma
 
@@ -369,7 +436,7 @@ cox_text_asy <- paste0("HR = ", round(hr_ci_asy$hr, lr.digits),
                      " (", round(hr_ci_asy$lower, lr.digits), ", ", round(hr_ci_asy$upper, lr.digits), ")")
 
 ans$cox_text_asy <- cox_text_asy
-
+ans$weight_variance <- weight_variance
 
 ans
 }
@@ -390,6 +457,21 @@ ans
 #' @param draws Number of resampling iterations (default: 100).
 #' @param seedstart Random seed for reproducibility (default: 8316951).
 #' @return List with resampling results (score, beta, standard error, etc.).
+#' @details The multipliers are standard normal, one row per subject (\code{G0.draws} for controls,
+#'   \code{G1.draws} for treated, in the order of \code{fit_rhogamma$time}), drawn under
+#'   \code{set.seed(seedstart)}; the caller's random-number stream is restored afterwards. With
+#'   \code{w_hat} absent or all equal, the multipliers perturb the events only, as before, and these
+#'   results are unchanged. When \code{w_hat} is not all equal, each resampled score is built from the
+#'   per-subject score contributions described below:
+#'   \code{score_star} is \eqn{-\sum_i G_i \psi_i(\hat\beta)}{-sum_i G_i psi_i(bhat)} and
+#'   \code{score_star_null} is \eqn{-\sum_i G_i \psi_i(0)}{-sum_i G_i psi_i(0)}, so their variance over
+#'   draws is the variance of the score used for \code{sig_bhat_asy} and the log-rank z-score
+#'   (\code{K_wt_rg} and \code{K_zero} are then not used). \code{bhat_center_star}, \code{Z_bstar} and
+#'   \code{sig_bhat_star} are formed from \code{score_star} as before. When \code{fit_rhogamma} comes
+#'   from a \code{\link{df_counting}} result made with \code{weight_variance = "estimated"} (it then holds
+#'   \code{ew_parts}), the contributions carry the estimation of the weights,
+#'   \eqn{\psi_i + IF_i' B}{psi_i + IF_i' B} (section "Estimated weights" of \code{\link{df_counting}}).
+#' @inheritSection df_counting Variance of the log-rank and Cox score with subject weights
 #' @importFrom stats var rnorm
 #' @export
 
@@ -414,15 +496,49 @@ cox_rhogamma_resample <- function(fit_rhogamma, i_bhat, K_wt_rg, i_zero, K_zero,
   if (n0 + n1 != n) stop("z must be a (0/1) treatment group indicator")
 
   if (is.null(G0.draws) && is.null(G1.draws) && draws > 0) {
-    set.seed(seedstart)
-    G0.draws <- matrix(rnorm(draws * n0), ncol = draws)
-    G1.draws <- matrix(rnorm(draws * n1), ncol = draws)
+    G_draws <- ws_with_seed(seedstart, list(
+      G0 = matrix(rnorm(draws * n0), ncol = draws),
+      G1 = matrix(rnorm(draws * n1), ncol = draws)
+    ))
+    G0.draws <- G_draws$G0
+    G1.draws <- G_draws$G1
   }
   idx0 <- which(z == 0)
   idx1 <- which(z == 1)
   y0 <- time[idx0]; d0 <- delta[idx0]
   y1 <- time[idx1]; d1 <- delta[idx1]
   w0_hat <- w_hat[idx0]; w1_hat <- w_hat[idx1]
+
+  ew <- fit_rhogamma$ew_parts
+  if (ws_weights_unequal(w_hat) || !is.null(ew)) {
+    # Subject weights not all equal: each resampled score is -sum_i G_ib psi_i(b), with psi_i the
+    # per-subject score contributions (see ws_score_psi()) at bhat and at 0. Row i of G is that
+    # subject's row in the multiplier matrices (G0.draws for controls, G1.draws for treated).
+    G <- matrix(0, nrow = n, ncol = ncol(G0.draws))
+    G[idx0, ] <- G0.draws
+    G[idx1, ] <- G1.draws
+    psi_bhat <- ws_score_psi(time, delta, z, w_hat, K = wt_rg, beta = bhat)$psi
+    psi_zero <- ws_score_psi(time, delta, z, w_hat, K = wt_rg, beta = 0)$psi
+    # Estimated weights (a fit from a df_counting() result made with weight_variance = "estimated"):
+    # the contributions carry the term through the propensity model, psi_i + IF_i' B
+    if (!is.null(ew)) {
+      psi_bhat <- ws_score_ew(psi_bhat, w_hat, ew$IF, ew$dw)
+      psi_zero <- ws_score_ew(psi_zero, w_hat, ew$IF, ew$dw)
+    }
+    score_star <- -colSums(G * psi_bhat)
+    score_star_null <- -colSums(G * psi_zero)
+    bhat_center_star <- score_star / i_bhat
+    Z_bstar <- bhat_center_star / sig_bhat_asy
+    var_bhat_star <- var(bhat_center_star, na.rm = TRUE)
+    sig_bhat_star <- sqrt(var_bhat_star)
+    return(list(
+      score_star = score_star,
+      score_star_null = score_star_null,
+      bhat_center_star = bhat_center_star,
+      Z_bstar = Z_bstar,
+      sig_bhat_star = sig_bhat_star
+    ))
+  }
 
   event_mat0 <- outer(y0, at_points, FUN = "<=")
   risk_mat0  <- outer(y0, at_points, FUN = ">=")

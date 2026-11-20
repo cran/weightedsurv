@@ -18,8 +18,10 @@ KM_diff(
   draws.band = 0,
   tau.seq = 0.25,
   qtau = 0.025,
-  show_resamples = TRUE,
-  modify_tau = FALSE
+  show_resamples = FALSE,
+  modify_tau = FALSE,
+  weight_variance = c("known", "estimated"),
+  weight_model = NULL
 )
 }
 \arguments{
@@ -27,15 +29,20 @@ KM_diff(
 
 \item{tte.name}{Character; name of time-to-event variable in \code{df}.}
 
-\item{event.name}{Character; name of event indicator variable in \code{df} (1=event, 0=censored).}
+\item{event.name}{Character; name of event indicator variable in \code{df} (1=event, 0=censored).
+Logical (TRUE = event) and 1/2 coding (2 = event, as \code{survival::Surv} reads it) are also accepted.}
 
 \item{treat.name}{Character; name of treatment group variable in \code{df} (0=control, 1=treatment).}
 
 \item{weight.name}{Character or NULL; name of weights variable in \code{df}.}
 
-\item{at_points}{Numeric vector; time points for calculation. Default: sorted unique event times.}
+\item{at_points}{Numeric vector; time points at which the curves are returned: finite and
+non-decreasing (duplicates are allowed and returned as given). The Kaplan-Meier value at each
+point is right-continuous, whether or not the points include the event times.
+Default: the sorted observed times.}
 
-\item{alpha}{Numeric; significance level for confidence intervals. Default: 0.05.}
+\item{alpha}{Numeric; significance level for the pointwise intervals and the simultaneous band
+(the band's critical value is the \code{1 - alpha} quantile of the resampled suprema). Default: 0.05.}
 
 \item{seedstart}{Integer; random seed for reproducibility. Default: 8316951.}
 
@@ -49,9 +56,19 @@ KM_diff(
 
 \item{qtau}{Numeric; quantile for tau range restriction. Default: 0.025.}
 
-\item{show_resamples}{Logical; whether to plot resampled curves. Default: TRUE.}
+\item{show_resamples}{Logical; whether to plot the first 20 standardised resampled difference curves
+(only when \code{draws.band > 0}). Default: FALSE.}
 
 \item{modify_tau}{Logical; whether to restrict time range for simultaneous bands. Default: FALSE.}
+
+\item{weight_variance}{How the weights are treated in standard errors, intervals, bands and tests.
+\code{"known"} (default): as fixed, known numbers. \code{"estimated"}: as estimated by the logistic
+propensity model given in \code{weight_model}, whose estimation is carried into the inference. Estimates
+never change. See the section "Estimated weights".}
+
+\item{weight_model}{With \code{weight_variance = "estimated"}, the object returned by
+\code{\link{ps_weights}} for the rows of \code{df}, in the same order; its weights must be the column
+\code{weight.name}. Ignored with \code{"known"}.}
 }
 \value{
 A list containing:
@@ -66,6 +83,7 @@ A list containing:
 \item{c_alpha_band}{Critical value for simultaneous band (if draws.band > 0)}
 \item{dhat_star}{Matrix of resampled differences (if draws.band > 0)}
 \item{Zdhat_star}{Standardized resampled differences (if draws.band > 0)}
+\item{weight_variance}{\code{"known"} or \code{"estimated"}: how the weights were treated}
 }
 }
 \description{
@@ -81,18 +99,145 @@ When \code{draws.band > 0}, simultaneous confidence bands are constructed using
 the supremum distribution of the standardized difference process. These bands
 maintain the specified coverage probability across all time points simultaneously.
 
-The variance is estimated using Greenwood's formula for unweighted data, or
-resampling-based methods when \code{draws > 0}.
+The pointwise variance of each arm's curve is Greenwood's formula for unweighted data (or all
+weights equal) and the robust variance for weights that are not all equal (see the section below),
+or resampling-based when \code{draws > 0} and the weights are not all equal.
+
+For weights that are not all equal, the resampled curves (\code{surv0_star}, \code{surv1_star},
+and from them \code{dhat_star}, \code{Zdhat_star}, the simultaneous band and
+\code{\link{cumulative_rmst_bands}}) are built from the same per-subject contributions as the
+robust variance (\code{\link{resampling_survival}}), so the variance across draws matches the
+analytic variance. With no weights or all weights equal they are unchanged.
 }
 \note{
-Treatment must be coded as 0=control, 1=experimental. Event must be binary (0/1).
+Treatment must be coded as 0=control, 1=experimental, and both arms must have observations.
+Missing values, non-finite or negative times and negative weights are errors (rows are never
+dropped silently); zero weights are allowed and those rows contribute nothing: they do not
+affect which variance formula runs either (whether the weights are all equal is decided on the
+positive weights).
+
+With \code{weight_variance = "estimated"} the variance of the difference is not the sum of the
+two arm variances, and \code{draws} must be 0.
 }
+\section{Variance of the Kaplan-Meier estimate}{
+
+With no weights, or with all weights equal, the variance of a Kaplan-Meier estimate is
+Greenwood's formula, and these results are unchanged. When the weights are not all equal it is
+the robust (infinitesimal-jackknife) variance
+\deqn{\widehat{Var}[\hat S(t)] = \hat S(t)^2 \sum_i w_i^2 \psi_i(t)^2,}{Var[S(t)] = S(t)^2 * sum_i w_i^2 psi_i(t)^2,}
+\deqn{\psi_i(t) = \frac{D_i 1(U_i \le t)}{Y_w(U_i) - dN_w(U_i)} - \sum_{s \le \min(t, U_i)} \frac{dN_w(s)}{Y_w(s)\{Y_w(s) - dN_w(s)\}},}{psi_i(t) = D_i 1(U_i <= t) / (Y_w(U_i) - dN_w(U_i)) - sum_{s <= min(t, U_i)} dN_w(s) / [Y_w(s) (Y_w(s) - dN_w(s))],}
+where \eqn{U_i}, \eqn{D_i} and \eqn{w_i} are subject \eqn{i}'s time, event indicator and weight,
+\eqn{Y_w(s)} is the weighted number at risk, \eqn{dN_w(s)} the weighted number of events at
+\eqn{s}, the sum runs over event times, and a term is 0 where
+\eqn{Y_w(s) - dN_w(s) \le 10^{-10} Y_w(s)}. It equals the standard error of
+\code{survival::survfit(weights = w, robust = TRUE)} (on the time-fixed data), reduces to
+Greenwood's formula at equal weights, and does not depend on the scale of the weights.
+With \code{draws > 0} and unequal weights the variance is instead the variance over resampling
+draws of \eqn{\sum_i G_i w_i \psi_i(t)} (standard-normal multipliers \eqn{G_i}), which estimates
+the same quantity; resampled curves for weighted data are built from the same per-subject
+contributions (see \code{\link{resampling_survival}}).
+By default the weights are treated as fixed and known. For weights estimated by a logistic
+propensity model, \code{weight_variance = "estimated"} carries their estimation into the standard
+error (section "Estimated weights" of \code{\link{df_counting}}). When the weights are extreme
+(low effective sample size) the standard error can be too small under either option.
+}
+
 \section{Confidence Intervals vs Bands}{
 
 \itemize{
 \item Pointwise CIs (\code{lower}, \code{upper}): Cover the true difference at each time point with probability 1-alpha
 \item Simultaneous bands (\code{sb_lower}, \code{sb_upper}): Cover the entire difference curve with probability 1-alpha
 }
+}
+
+\section{Estimated weights}{
+
+Propensity-score weights are estimated from the data. \code{weight_variance} says how standard
+errors, intervals, bands and tests treat them.
+\describe{
+\item{\code{"known"} (default)}{The weights are fixed, known numbers: the formulas of the two
+sections above. \code{weight_model} is ignored.}
+\item{\code{"estimated"}}{The weights were estimated by a logistic regression for the treatment,
+given as \code{weight_model} (the object returned by \code{\link{ps_weights}}), and that
+estimation is carried into the inference.}
+}
+Estimates never change: survival curves, their difference, RMST, the log-rank score, hazard
+ratios, counts and risk tables are identical under the two options. Only standard errors,
+intervals, bands and tests differ.
+
+Notation. There are \eqn{n} subjects, the rows analysed. Subject \eqn{i} has arm \eqn{A_i},
+row \eqn{x_i} of the model matrix of the propensity model (\eqn{p} columns), fitted probability
+\eqn{e_i} and weight \eqn{w_i} (written \eqn{a_i} in the score formulas above). The influence of
+subject \eqn{i} on the fitted coefficients and the derivative of its weight in the coefficients are
+\deqn{IF_i = \Big\{\sum_j x_j x_j' e_j (1 - e_j)\Big\}^{-1} x_i (A_i - e_i), \qquad dw_i = -\frac{1 - e_i}{e_i} x_i \ (A_i = 1), \quad dw_i = \frac{e_i}{1 - e_i} x_i \ (A_i = 0)}{IF_i = { sum_j x_j x_j' e_j (1 - e_j) }^(-1) x_i (A_i - e_i);  dw_i = -((1 - e_i) / e_i) x_i (treated),  dw_i = (e_i / (1 - e_i)) x_i (control)}
+(for stabilised weights \eqn{w_i} and \eqn{dw_i} are multiplied by the arm proportion).
+
+Kaplan-Meier estimate of a group \eqn{g} (an arm; an arm within a stratum; all subjects). With
+\eqn{\psi_i(t)}{psi_i(t)} the influence value of the section "Variance of the Kaplan-Meier
+estimate", computed from the group's own weighted counts,
+\deqn{D_g(t) = \sum_{k \in g} \psi_k(t)\, dw_k, \qquad \Phi_i(t) = 1(i \in g)\, w_i \psi_i(t) + IF_i' D_g(t) \quad (i = 1, \ldots, n),}{D_g(t) = sum_{k in g} psi_k(t) dw_k,   Phi_i(t) = 1(i in g) w_i psi_i(t) + IF_i' D_g(t)   (i = 1, ..., n),}
+\deqn{\widehat{Var}[\hat S_g(t)] = \hat S_g(t)^2 \sum_{i=1}^n \Phi_i(t)^2.}{Var[S_g(t)] = S_g(t)^2 * sum_{i=1}^n Phi_i(t)^2.}
+Every subject contributes, also those outside the group, through the model. The variance of the
+difference of the two arms is
+\deqn{\widehat{Var}[\hat S_1(t) - \hat S_0(t)] = \sum_{i=1}^n \{\hat S_1(t) \Phi^1_i(t) - \hat S_0(t) \Phi^0_i(t)\}^2,}{Var[S_1(t) - S_0(t)] = sum_{i=1}^n ( S_1(t) Phi1_i(t) - S_0(t) Phi0_i(t) )^2,}
+which is \strong{not} the sum of the two arm variances: the arms share the model's coefficients.
+A resampled curve of arm \eqn{a} is
+\eqn{-\hat S_a(t) \sum_{i=1}^n G_i \Phi^a_i(t)}{-S_a(t) sum_{i=1}^n G_i Phi^a_i(t)} with the
+standard-normal multipliers \eqn{G_i} that \code{\link{KM_diff}} generates in any case; the
+resampled difference curves, the simultaneous band and the RMST variance and band of
+\code{\link{cumulative_rmst_bands}} follow from them unchanged.
+
+Score of the log-rank test and of the weighted Cox estimate. With
+\eqn{\psi_i(\beta)}{psi_i(b)} the contribution of the section "Variance of the log-rank and Cox
+score with subject weights", computed within each stratum,
+\deqn{B(\beta) = \sum_{j=1}^n \frac{\psi_j(\beta)}{a_j}\, dw_j, \qquad \psi^{ew}_i(\beta) = \psi_i(\beta) + IF_i' B(\beta), \qquad \widehat{Var}\{U(\beta)\} = \sum_{i=1}^n \psi^{ew}_i(\beta)^2.}{B(b) = sum_{j=1}^n (psi_j(b) / a_j) dw_j,   psi_ew_i(b) = psi_i(b) + IF_i' B(b),   Var(U(b)) = sum_{i=1}^n psi_ew_i(b)^2.}
+The log-rank z-score, the variance of the log hazard ratio estimate (the sum at
+\eqn{\hat\beta}{bhat} over the squared information) and a resampled score
+(\eqn{-\sum_i G_i \psi^{ew}_i(\beta)}{-sum_i G_i psi_ew_i(b)}) are formed as before with
+\eqn{\psi^{ew}}{psi_ew} in place of \eqn{\psi}{psi}. In a stratified analysis the variance is this
+single sum over all subjects, not a sum of per-stratum variances. The cumulative variance of
+\code{\link{wlr_cumulative}} is \eqn{\sum_i \{c_i(t) + IF_i' B(t)\}^2}{sum_i (c_i(t) + IF_i' B(t))^2}
+with \eqn{c_i(t)} the contribution of subject \eqn{i} to the score up to \eqn{t} and
+\eqn{B(t) = \sum_j \{c_j(t) / a_j\} dw_j}{B(t) = sum_j (c_j(t) / a_j) dw_j}; in
+\code{\link{wlr_dhat_estimates}} the contribution to the survival difference is
+\eqn{d_i + IF_i' (\hat S_0 D_0 - \hat S_1 D_1)}{d_i + IF_i' (S_0 D_0 - S_1 D_1)} at the grid point
+read for \code{tzero}, and the covariance uses both adjusted contributions. The outputs of
+\code{df_counting()} that come from the \code{survival} package (\code{logrank_results},
+\code{cox_results$score}, \code{$se}, \code{$hr_ci}, \code{$pval}) carry the same adjustment,
+applied to \code{coxph()}'s weighted score and dfbeta residuals \eqn{r}:
+\eqn{r_i + IF_i' \sum_j (r_j / w_j) dw_j}{r_i + IF_i' sum_j (r_j / w_j) dw_j}.
+
+How to use it. Fit the propensity model on exactly the rows to be analysed with
+\code{\link{ps_weights}}, put its weights in a column of \code{df}, and pass
+\code{weight_variance = "estimated"} and \code{weight_model} to \code{df_counting()},
+\code{\link{KM_diff}}, \code{\link{cumulative_rmst_bands}} or \code{\link{plotKM.band_subgroups}}.
+\code{\link{cox_rhogamma}}, \code{\link{wlr_cumulative}} and \code{\link{wlr_dhat_estimates}} take the
+option from the \code{df_counting()} result they are given (its elements \code{weight_variance} and
+\code{ew_parts}). The rows of \code{df}, the treatment column and the weight column must be those of
+\code{weight_model}; anything else is an error.
+
+Scope and limits of this version.
+\itemize{
+\item A logistic \code{glm} for a binary treatment, fitted on exactly the rows analysed. For
+weights from any other model use \code{"known"}.
+\item A subgroup analysis that reuses weights from a model fitted on the full sample must use
+\code{"known"}: the model's rows are then not the rows analysed. (The subgroup curves of
+\code{plotKM.band_subgroups()} are point estimates and are not affected.)
+\item \code{draws > 0} (the resampling-based pointwise variance) is not available with
+\code{"estimated"}; \code{draws.band} and the resampling of \code{cox_rhogamma()} are.
+\item The time weights of the scheme (Fleming-Harrington and the others) depend on the weighted
+pooled curve; that dependence on the estimated weights is ignored.
+\item With stabilised weights the arm proportion is treated as a fixed number. The Kaplan-Meier
+quantities do not depend on that: they are unchanged when an arm's weights are multiplied by a
+constant.
+\item With \code{"estimated"} the influence-based formulas always run; whether the weights are all
+equal is not tested.
+\item Carrying the estimation through does not repair extreme weights: when the effective sample
+size (\code{df_counting()$ess}) is a small fraction of an arm, standard errors, intervals and
+tests can be too optimistic under either option.
+}
+The device of carrying the estimation of a nuisance quantity into the inference by perturbing its
+estimate is that of Leon, Cai and Wei (2009); it is used here in linearised form.
 }
 
 \examples{
@@ -119,7 +264,8 @@ result_band <- KM_diff(
   event.name = "status",
   treat.name = "treat",
   draws.band = 1000,
-  modify_tau = TRUE
+  modify_tau = TRUE,
+  show_resamples = TRUE
 )
 
 }
@@ -128,10 +274,11 @@ result_band <- KM_diff(
 \code{\link{plotKM.band_subgroups}} for visualization
 \code{\link{cumulative_rmst_bands}} for RMST analysis
 
-Other survival_analysis: 
-\code{\link{cox_rhogamma}()},
-\code{\link{df_counting}()},
-\code{\link{wt.rg.S}()}
+Other survival_analysis:
+\code{\link[=cox_rhogamma]{cox_rhogamma()}},
+\code{\link[=df_counting]{df_counting()}},
+\code{\link[=ps_weights]{ps_weights()}},
+\code{\link[=wt.rg.S]{wt.rg.S()}}
 }
 \concept{plotting_functions}
 \concept{survival_analysis}

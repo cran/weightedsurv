@@ -15,6 +15,38 @@
 #' @param rmst_max_legend Position for RMST legend (default: "left").
 #' @param rmst_max_cex Text size for RMST legend (default: 0.7).
 #' @param plot Logical; if TRUE, plot the results. Default is TRUE.
+#' @param mean_rule Character; how the survival difference is integrated over the time grid of
+#'   \code{fit} (\code{fit$at_points}). \code{"trapezoid"} (default) averages the difference at
+#'   consecutive grid points: \eqn{R(t_j) = \sum_{k \le j} \{d(t_{k-1}) + d(t_k)\}/2 \, (t_k - t_{k-1})}.
+#'   \code{"rectangle"} is the left-rectangle sum
+#'   \eqn{R(t_j) = \sum_{k \le j} d(t_{k-1}) (t_k - t_{k-1})}, the exact area under the step
+#'   function. In both, \eqn{R = 0} at the first grid point. \code{"rectangle"} equals the
+#'   difference of \code{survfit()}'s restricted means (\code{summary(fit, rmean = tau)}) when the
+#'   time grid holds every event time, which it does for the default \code{KM_diff()} grid; it does
+#'   not when the fit was made with \code{modify_tau = TRUE}. The rule applies to the estimate and
+#'   to both sets of resampled curves; nothing else changes.
+#' @param weight_variance How the weights are treated in standard errors, intervals, bands and tests.
+#'   \code{"known"} (default): as fixed, known numbers. \code{"estimated"}: as estimated by the logistic
+#'   propensity model given in \code{weight_model}, whose estimation is carried into the inference. Estimates
+#'   never change. See the section "Estimated weights".
+#' @param weight_model With \code{weight_variance = "estimated"}, the object returned by
+#'   \code{\link{ps_weights}} for the rows of \code{df}, in the same order; its weights must be the column
+#'   \code{weight.name}. Ignored with \code{"known"}.
+#'
+#' @details The pointwise variance of the cumulative RMST difference and the simultaneous band come
+#' from the resampled survival-difference curves of \code{fit} (\code{fit$dhat_star}) and of a
+#' second \code{\link{KM_diff}} call with \code{seedstart = 99999}. With weights that are not all
+#' equal, those resampled curves are built from the per-subject contributions of the robust
+#' variance (see \code{\link{resampling_survival}}), so the RMST variance and bands are the robust
+#' ones; with no weights or all weights equal they are unchanged. By default the weights are treated
+#' as fixed and known. For weights estimated by a logistic propensity model,
+#' \code{weight_variance = "estimated"} (with the same option in the \code{KM_diff()} call that made
+#' \code{fit}; a \code{fit} made with the other option is an error) carries their estimation into both
+#' sets of resampled curves, and so into the variance, the intervals and the band (section "Estimated
+#' weights"). With extreme weights (low effective sample size) the intervals can be too narrow under
+#' either option.
+#'
+#' @inheritSection df_counting Estimated weights
 #'
 #' @return A list with elements:
 #'   \item{at_points}{Time points used for RMST calculation}
@@ -27,6 +59,8 @@
 #'   \item{c_alpha_band}{Critical value for simultaneous band}
 #'   \item{rmst_time_sb_lower}{Simultaneous band lower bound}
 #'   \item{rmst_time_sb_upper}{Simultaneous band upper bound}
+#'   \item{mean_rule}{The integration rule used}
+#'   \item{weight_variance}{\code{"known"} or \code{"estimated"}: how the weights were treated}
 #'
 #' @importFrom stats quantile rnorm
 #' @importFrom utils head tail
@@ -34,13 +68,26 @@
 #' @export
 
 cumulative_rmst_bands <- function(df, fit, tte.name, event.name, treat.name, weight.name = NULL, draws_sb = 1000, xlab="months", ylim_pad = 0.5,
-                                  rmst_max_legend = "left", rmst_max_cex = 0.7, plot = TRUE) {
+                                  rmst_max_legend = "left", rmst_max_cex = 0.7, plot = TRUE,
+                                  mean_rule = c("trapezoid", "rectangle"),
+                                  weight_variance = c("known", "estimated"), weight_model = NULL) {
+  mean_rule <- match.arg(mean_rule)
+  weight_variance <- match.arg(weight_variance)
   # Input validation
   if (!is.data.frame(df)) stop("df must be a data frame.")
   required_names <- c(tte.name, event.name, treat.name, weight.name)
   missing <- setdiff(required_names, names(df))
   if (length(missing) > 0) stop(sprintf("Missing columns in df: %s", paste(missing, collapse = ", ")))
   if (!is.list(fit)) stop("fit must be a list (output from KM_diff).")
+  if (is.null(fit[["dhat_star"]])) {
+    stop("cumulative_rmst_bands() needs a KM_diff() fit made with draws.band > 0 (fit$dhat_star is missing).")
+  }
+  # the fit and this call must treat the weights the same way (a fit without the element counts as "known")
+  fit_wv <- if (is.null(fit[["weight_variance"]])) "known" else fit[["weight_variance"]]
+  if (!identical(fit_wv, weight_variance)) {
+    stop(sprintf("cumulative_rmst_bands(): weight_variance = \"%s\" but fit was made with weight_variance = \"%s\"; make the KM_diff() fit and this call with the same option.",
+                 weight_variance, fit_wv), call. = FALSE)
+  }
 
 ans <- list()
 at_points <- fit$at_points
@@ -51,17 +98,13 @@ risk.points <- fit$risk.points
 ans$at_points <- at_points
 
 dt <- diff(at_points)
-mid_dhat <- (head(dhat, -1) + tail(dhat, -1)) / 2
 
-rmst_time <- c(0, cumsum(mid_dhat * dt))
+rmst_time <- ws_cumulative_mean(dhat, dt, mean_rule)
 
 ans$rmst_time <- rmst_time
 
 # For multiple draws (matrix: rows=time, cols=draws)
-cum_rmst_stars <- apply(dhat_star_mat, 2, function(dhat_star) {
-  mid_dhat <- (head(dhat_star, -1) + tail(dhat_star, -1)) / 2
-  c(0, cumsum(mid_dhat * dt))
-})
+cum_rmst_stars <- apply(dhat_star_mat, 2, ws_cumulative_mean, dt = dt, rule = mean_rule)
 sig2_rmst_time <- apply(cum_rmst_stars, 1, var, na.rm=TRUE)
 
 ans$sig2_rmst_time <- sig2_rmst_time
@@ -92,15 +135,13 @@ fit_draws <- KM_diff(
   df = df, tte.name = tte.name, event.name = event.name , treat.name = treat.name, weight.name = weight.name,
   at_points = at_points, alpha = 0.05, risk.points = risk.points,
   modify_tau = FALSE,
-  draws.band = draws_sb, seedstart = 99999, show_resamples = FALSE
+  draws.band = draws_sb, seedstart = 99999, show_resamples = FALSE,
+  weight_variance = weight_variance, weight_model = weight_model
 )
 
 dhat_star_mat2 <- fit_draws$dhat_star
 
-cum_rmst_stars2 <- apply(dhat_star_mat2, 2, function(dhat_star) {
-  mid_dhat <- (head(dhat_star, -1) + tail(dhat_star, -1)) / 2
-  c(0, cumsum(mid_dhat * dt))
-})
+cum_rmst_stars2 <- apply(dhat_star_mat2, 2, ws_cumulative_mean, dt = dt, rule = mean_rule)
 
 # Standardized resamples
 rmst_time_star <- cum_rmst_stars2 / sqrt(sig2_rmst_time)
@@ -117,6 +158,8 @@ rmst_time_sb_upper <- rmst_time + c_alpha_band * sqrt(sig2_rmst_time)
 
 ans$rmst_time_sb_lower <- rmst_time_sb_lower
 ans$rmst_time_sb_upper <- rmst_time_sb_upper
+ans$mean_rule <- mean_rule
+ans$weight_variance <- weight_variance
 
 if(plot){
 x <- at_points
